@@ -1,9 +1,9 @@
 # Lattice Standard Model roadmap
 
-**Status:** Phases 0–3 done (manifold HMC with Metropolis; all observables on
-HMC ensembles with jackknife errors; exact 2D U(1), SU(2) strong-coupling,
-area-law string tension, and Weinberg-relation validations); Phase 4 = (B)
-physics-first, first milestones done; 44 tests green, ruff clean ·
+**Status:** Phase 3 complete — manifold HMC with Metropolis, all observables on
+HMC ensembles with autocorrelation-aware jackknife errors; exact 2D U(1), SU(2)
+strong-coupling, area-law string tension, and Weinberg-relation validations;
+Phase 4 = (B) physics-first, first milestones done; 50 tests green, ruff clean ·
 **Last updated:** 2026-07-31
 
 Everything checked below is pinned by `tests/` or reproducible by a script in
@@ -58,9 +58,23 @@ Everything checked below is pinned by `tests/` or reproducible by a script in
       kernels + `ensemble_*` wrappers with jackknife errors, incl.
       `jackknife_transformed` for nonlinear observables like V(R)); the old
       single-cooled-configuration measurement API is gone
-- [ ] autocorrelation-aware errors (binning / integrated autocorrelation time);
-      plain jackknife on correlated series underestimates the small-beta U(1)
-      error bars by ~2x
+- [x] autocorrelation-aware errors: `integrated_autocorrelation_time` (Madras-
+      Sokal windowing, lags capped at n/2) inflates every jackknife error by
+      sqrt(2 tau_int) in `src/measure.py`. Validated against AR(1) chains with
+      analytic tau_int = 1/2 + phi/(1-phi), and against the empirical spread of
+      the mean over 60 independent chains (`tests/test_autocorrelation.py`).
+      Inflation, not block-binning: our ensembles are O(10-100) configurations,
+      too few for a variance over blocks.
+      Findings from re-running the benchmarks:
+      - the earlier "small-beta U(1) off by ~2x" note was backwards. tau_int
+        *grows* with beta (critical slowing down): U(1) 6^2 goes 1.00 at
+        beta=0.25 to 3.91 at beta=2.0, so the correction is 1.4x at small beta
+        and 2.8x at large beta (`benchmarks/hmc_plaquette_scan.py`, which now
+        prints tau_int per point).
+      - every cited validation number below is unchanged, because they are all
+        measured on ensembles thinned by `sample_every`: at sample_every=4 the
+        SU(3) 8^2 series has tau_int = 0.50 (inflation 1.00) versus 0.87
+        (inflation 1.32) unthinned. Thinning was already doing the work.
 
 ## Phase 4 — ML direction: (B) physics-first, decided 2026-07-31
 
@@ -86,8 +100,14 @@ Everything checked below is pinned by `tests/` or reproducible by a script in
 ## Validation milestones
 
 - [x] 2D U(1) average plaquette vs. the exact solution I1(b)/I0(b): matches
-      across beta in [0.25, 3] (pinned at beta=1 by `test_hmc.py`; full scan
-      in `benchmarks/hmc_plaquette_scan.py`)
+      across beta in [0.25, 3] — largest deviation 1.6 sigma, signs scattered
+      (0.1177(42) vs 0.1240 at beta=0.25, 0.4405(52) vs 0.4464 at beta=1.0,
+      0.6034(45) vs 0.5961 at beta=1.5). The earlier one-sided deficit was an
+      artefact of `scan()` reseeding to 0 before every beta, which correlated
+      the six points (r = 0.3-0.7); with distinct seeds and 2000 trajectories
+      it is gone. Sampler exactness verified independently — see
+      `research/2026-07-31-u1-plaquette-deficit.md`. (Pinned at beta=1 by
+      `test_hmc.py`; full scan in `benchmarks/hmc_plaquette_scan.py`.)
 - [x] 3D SU(2) plaquette: strong-coupling limit reproduced
       (<P> = 0.1257(30) vs beta/4 = 0.125 at beta = 0.5); full scan
       interpolates to the weak-coupling envelope
