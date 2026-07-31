@@ -20,8 +20,11 @@ PLOTS = Path(__file__).parent.parent / "plots"
 def scan(group: str, dim: int, betas: list[float], shape: tuple[int, ...],
          n_traj: int, warmup: int) -> tuple[list[float], list[float]]:
     means, errs = [], []
-    for beta in betas:
-        torch.manual_seed(0)
+    # a distinct seed per beta: reseeding to the same value made every beta
+    # consume the same random stream, correlating the points (r ~ 0.3-0.7) so
+    # that one common-mode fluctuation looked like a systematic deviation
+    for i, beta in enumerate(betas):
+        torch.manual_seed(1000 + i)
         # start coarse; run() auto-tunes eps during warmup toward ~70-85%
         # acceptance for each (beta, volume)
         smc = StandardModelHMC(lattice_shape=shape, groups={group: dim},
@@ -43,7 +46,9 @@ def main() -> None:
 
     # --- U(1) in 2D: exactly solvable ---
     betas_u1 = [0.25, 0.5, 1.0, 1.5, 2.0, 3.0]
-    means, errs = scan('u1', 1, betas_u1, (6, 6), n_traj=250, warmup=50)
+    # 250 trajectories left a ~0.014 per-run scatter, wide enough that single
+    # points wandered 2 sigma off the exact curve; 2000 cuts that ~3x
+    means, errs = scan('u1', 1, betas_u1, (6, 6), n_traj=2000, warmup=200)
     bb = np.linspace(0.05, 3.2, 200)
     axes[0].errorbar(betas_u1, means, yerr=errs, fmt='o', capsize=3, label='HMC')
     axes[0].plot(bb, iv(1, bb) / iv(0, bb), 'r--', label=r'exact $I_1(\beta)/I_0(\beta)$')
