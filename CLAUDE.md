@@ -27,7 +27,11 @@ learns matter fields on fixed gauge ensembles.
 - `src/dirac.py` — gamma matrices (single convention: chiral, `g5 = diag(I,-I)`),
   Wilson-Dirac operators (standalone and message-passing), generic CG.
 - `src/actions.py` — Wilson, Higgs, and pseudofermion actions/losses.
-- `src/vacuum.py` — standalone vacuum finders (Adam cooling, Langevin).
+- `src/hmc.py` — manifold HMC: Lie-algebra momenta, autograd forces (note the
+  torch complex-grad convention documented there), leapfrog + Metropolis.
+  `StandardModelHMC` covers pure gauge, gauge+Higgs, and the full system.
+- `src/vacuum.py` — standalone vacuum finders (Adam cooling, Langevin; the
+  Langevin sampler is unadjusted and biased — HMC is the exact sampler).
 - `src/standard_model.py` — the heterogeneous SM GNN and its Langevin sampler.
   Physics caveat documented there: the chirality-split electroweak transport
   plus a Wilson term is not an exactly gauge-invariant chiral lattice theory

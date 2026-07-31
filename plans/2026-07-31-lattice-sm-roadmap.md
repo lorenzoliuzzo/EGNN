@@ -1,8 +1,9 @@
 # Lattice Standard Model roadmap
 
-**Status:** Phases 0–2 done (correctness review applied, consolidated `src/`
-layout, 32 tests green, ruff clean); Phase 3 (sampling) not started; Phase 4
-direction undecided · **Last updated:** 2026-07-31
+**Status:** Phases 0–2 done; Phase 3 core done (manifold HMC with Metropolis,
+exact 2D U(1) validation, SU(2) strong-coupling check, jackknife plaquettes);
+Phase 4 decided: (B) physics-first HMC; 39 tests green, ruff clean ·
+**Last updated:** 2026-07-31
 
 Everything checked below is pinned by `tests/` or reproducible by a script in
 `benchmarks/`. Nothing enters this file that we have not run.
@@ -38,27 +39,37 @@ Everything checked below is pinned by `tests/` or reproducible by a script in
       masses with rho ~ 1, heat-bath identity, flow-layer equivariance
 - [x] CI: ruff + pytest on CPU-only torch
 
-## Phase 3 — Sampling correctness (next)
+## Phase 3 — Sampling correctness
 
-- [ ] Metropolis-adjusted Langevin (MALA) or HMC; the current unadjusted
-      Euler–Maruyama step has O(dt) bias and ignores `training.temperature`
-- [ ] updates in the Lie algebra (project force to the tangent space,
-      exponentiate) instead of perturbing raw pre-projection tensors
-- [ ] ensemble measurement pipeline: decorrelated post-thermalization samples,
-      jackknife error bars (`src/measure.py:jackknife_effective_mass`) on every
-      plotted observable — no more single-configuration "measurements"
+- [x] HMC on the group manifold (`src/hmc.py`): momenta in the Lie algebra,
+      `U <- exp(i eps pi) U` updates, autograd forces (torch's complex grad is
+      `2 dS/dU*`; force `W = i(U G^dag - G U^dag)/2`, verified numerically),
+      leapfrog + Metropolis accept/reject — exact for `e^{-S}`, replacing the
+      biased unadjusted Langevin
+- [x] integrator invariants pinned by tests: reversibility, O(eps^2) energy
+      scaling, group preservation, momentum/kinetic normalization
+      (E[T] = dim(algebra)/2 per link)
+- [x] step-size auto-tuning during warmup toward 70–85% acceptance (also
+      escapes the cold-start all-reject trap); sampling phase runs at fixed eps
+- [x] ensemble plaquettes with jackknife errors (`average_plaquette`,
+      `jackknife_mean` in `src/measure.py`)
+- [ ] autocorrelation-aware errors (binning / integrated autocorrelation time);
+      plain jackknife on correlated series underestimates the small-beta U(1)
+      error bars by ~2x
+- [ ] port pion/EW/condensate measurements onto HMC ensembles (currently they
+      run on single cooled configurations)
 
-## Phase 4 — ML direction (decision pending)
+## Phase 4 — ML direction: (B) physics-first, decided 2026-07-31
 
-Two coherent options; pick one before writing code:
-
-- [ ] **(A) Normalizing-flow sampler**: train toward `e^{-S}` on fixed gauge
-      ensembles (reverse-KL with the flow log-det; surrogate-gradient CG)
-- [ ] **(B) Physics-first**: gauge links as parameters + HMC; the GNN is the
-      equivariant Dirac operator (message passing = parallel transport)
-
-Either way: AMP with complex tensors needs validation before trusting a run
-(currently enabled in `src/main.py`, inherited behavior).
+- [x] gauge links are the sampled state; the GNN operators are the physics
+      (message passing = parallel transport); pseudofermion forces enter HMC
+      through the CG surrogate gradient (`StandardModelHMC`,
+      full-system smoke test in `tests/test_hmc.py`)
+- [ ] fermionic HMC at scale: CG tolerance vs. acceptance study, per-sector
+      trajectory lengths, 4D lattices
+- [ ] decide the fate of the flow pipeline (`src/main.py`): keep as a side
+      experiment or retire; AMP with complex tensors needs validation before
+      trusting any run (inherited behavior, currently enabled)
 
 ## Phase 5 — Performance and polish
 
@@ -71,7 +82,13 @@ Either way: AMP with complex tensors needs validation before trusting a run
 
 ## Validation milestones
 
-- [ ] pure-gauge SU(2)/SU(3) average plaquette vs. beta against literature
+- [x] 2D U(1) average plaquette vs. the exact solution I1(b)/I0(b): matches
+      across beta in [0.25, 3] (pinned at beta=1 by `test_hmc.py`; full scan
+      in `benchmarks/hmc_plaquette_scan.py`)
+- [x] 3D SU(2) plaquette: strong-coupling limit reproduced
+      (<P> = 0.1257(30) vs beta/4 = 0.125 at beta = 0.5); full scan
+      interpolates to the weak-coupling envelope
+- [ ] SU(3) plaquette scan and 4D lattices vs. literature values
 - [ ] Higgs phase transition sweep with error bars
       (`benchmarks/higgs_phase_transition.py` exists; needs ensembles)
 - [ ] quenched pion correlator with cosh fit + GMOR linearity with errors

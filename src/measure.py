@@ -257,6 +257,28 @@ def run_gmor_test(
 # Ensemble statistics
 # ---------------------------------------------------------------------------
 
+@torch.no_grad()
+def average_plaquette(u_gates: torch.Tensor, plaq_idx: torch.Tensor,
+                      group_dim: int) -> float:
+    """Mean Re Tr(U_p)/N over all plaquettes (reverse path composition,
+    matching WilsonAction)."""
+    u_p = u_gates[plaq_idx]
+    loop = u_p[:, 0]
+    for i in range(1, u_p.shape[1]):
+        loop = torch.matmul(u_p[:, i], loop)
+    tr = torch.einsum('pii -> p', loop).real
+    return (tr / group_dim).mean().item()
+
+
+def jackknife_mean(values: list[float] | np.ndarray) -> tuple[float, float]:
+    v = np.asarray(values, dtype=float)
+    n = len(v)
+    if n < 2:
+        return float(v.mean()), float('nan')
+    jk = np.array([np.mean(np.delete(v, i)) for i in range(n)])
+    err = np.sqrt((n - 1) / n * np.sum((jk - jk.mean()) ** 2))
+    return float(v.mean()), float(err)
+
 def calculate_polyakov_loop(u_su3: torch.Tensor, L: int) -> float:
     """Confinement order parameter, assuming the interleaved 2D edge layout."""
     u_grid = u_su3.reshape(-1, 4, 3, 3)
