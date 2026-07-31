@@ -1,8 +1,9 @@
 # Lattice Standard Model roadmap
 
-**Status:** Phases 0–2 done; Phase 3 core done (manifold HMC with Metropolis,
-exact 2D U(1) validation, SU(2) strong-coupling check, jackknife plaquettes);
-Phase 4 decided: (B) physics-first HMC; 39 tests green, ruff clean ·
+**Status:** Phases 0–3 done (manifold HMC with Metropolis; all observables on
+HMC ensembles with jackknife errors; exact 2D U(1), SU(2) strong-coupling,
+area-law string tension, and Weinberg-relation validations); Phase 4 = (B)
+physics-first, first milestones done; 44 tests green, ruff clean ·
 **Last updated:** 2026-07-31
 
 Everything checked below is pinned by `tests/` or reproducible by a script in
@@ -53,11 +54,13 @@ Everything checked below is pinned by `tests/` or reproducible by a script in
       escapes the cold-start all-reject trap); sampling phase runs at fixed eps
 - [x] ensemble plaquettes with jackknife errors (`average_plaquette`,
       `jackknife_mean` in `src/measure.py`)
+- [x] all observables ported onto HMC ensembles (`src/measure.py`: per-config
+      kernels + `ensemble_*` wrappers with jackknife errors, incl.
+      `jackknife_transformed` for nonlinear observables like V(R)); the old
+      single-cooled-configuration measurement API is gone
 - [ ] autocorrelation-aware errors (binning / integrated autocorrelation time);
       plain jackknife on correlated series underestimates the small-beta U(1)
       error bars by ~2x
-- [ ] port pion/EW/condensate measurements onto HMC ensembles (currently they
-      run on single cooled configurations)
 
 ## Phase 4 — ML direction: (B) physics-first, decided 2026-07-31
 
@@ -88,9 +91,18 @@ Everything checked below is pinned by `tests/` or reproducible by a script in
 - [x] 3D SU(2) plaquette: strong-coupling limit reproduced
       (<P> = 0.1257(30) vs beta/4 = 0.125 at beta = 0.5); full scan
       interpolates to the weak-coupling envelope
+- [x] 2D SU(3) string tension vs. the exact area law on a quenched HMC
+      ensemble: sigma = 0.833(140) vs -ln<P> = 0.860 at beta = 6, L = 8^2,
+      20 configs (`benchmarks/qcd_observables.py`; SU(2) variant pinned by
+      `test_ensembles.py`)
+- [x] quenched pion mass + GMOR sweep with jackknife errors on a fixed
+      ensemble: m_pi rises monotonically 0.7475(122) -> 0.9757(113) over
+      m_q in [0.05, 0.25] (same benchmark)
+- [x] electroweak on thermalized SU(2)xU(1)+Higgs HMC ensembles
+      (`benchmarks/electroweak_masses.py`, 24 configs, L = 6^2): photon
+      massless, rho = 1.0026(26), M_W/M_Z = 0.9141 vs cos(theta_W) = 0.9129
 - [ ] SU(3) plaquette scan and 4D lattices vs. literature values
 - [ ] Higgs phase transition sweep with error bars
-      (`benchmarks/higgs_phase_transition.py` exists; needs ensembles)
-- [ ] quenched pion correlator with cosh fit + GMOR linearity with errors
-- [ ] electroweak: rho ~ 1, massless photon, M_W/M_Z = cos(theta_W) on
-      thermalized ensembles (ideal-vacuum version already pinned by tests)
+      (`benchmarks/higgs_phase_transition.py` still uses cooling; port to
+      HMC ensembles with the susceptibility/Binder machinery)
+- [ ] cosh fit (periodic correlator) instead of the log-slope fit for m_pi

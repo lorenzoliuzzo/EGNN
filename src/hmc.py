@@ -279,6 +279,11 @@ class StandardModelHMC:
         u = self.hmc.u_full(self.hmc.links[name])
         return average_plaquette(u, self.plaq_idx, self.groups[name])
 
+    def full_links(self, sample: dict) -> dict:
+        """Reconstruct full (forward + backward) edge tensors from a stored
+        HMC sample, for ensemble observables."""
+        return {name: self.hmc.u_full(sample[name]) for name in self.groups}
+
     def run(
         self,
         n_traj: int,

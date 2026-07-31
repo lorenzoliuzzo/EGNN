@@ -1,5 +1,9 @@
-"""Thermalize the standalone SU(3)xSU(2)xU(1)+Higgs vacuum with Langevin
-dynamics, then measure confinement and chiral observables."""
+"""Quenched QCD observables on an HMC ensemble: sample pure-gauge SU(3)
+configurations, then measure the Cornell potential, pion correlator, chiral
+condensate, and the GMOR relation with jackknife errors.
+
+In 2D the area law is exact (plaquettes quasi-decouple), so the fitted string
+tension sigma is compared against -ln<P> as a quantitative cross-check."""
 import sys
 from pathlib import Path
 
@@ -7,86 +11,122 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
+import torch  # noqa: E402
 
+from src.dirac import WilsonDiracOperator  # noqa: E402
+from src.hmc import StandardModelHMC  # noqa: E402
 from src.measure import (  # noqa: E402
-    measure_chiral_condensate,
-    measure_cornell_potential,
-    measure_pion_mass,
-    measure_rho_parameter,
-    run_gmor_test,
+    chiral_condensate_sample,
+    ensemble_chiral_condensate,
+    ensemble_cornell_potential,
+    ensemble_gmor,
+    ensemble_pion_mass,
+    fit_string_tension,
+    jackknife_mean,
+    pion_correlator,
 )
-from src.plotting import plot_qcd_action_landscape  # noqa: E402
-from src.vacuum import QuantumVacuumFinder  # noqa: E402
 
 PLOTS = Path(__file__).parent.parent / "plots"
 
 
-def main(lattice_shape: tuple[int, ...] = (16, 16), steps: int = 1000) -> None:
+def main(lattice_shape: tuple[int, ...] = (8, 8), beta_su3: float = 6.0,
+         n_traj: int = 160, warmup: int = 60, sample_every: int = 5,
+         bare_mass: float = 0.10) -> None:
     PLOTS.mkdir(exist_ok=True)
+    torch.manual_seed(0)
 
-    model = QuantumVacuumFinder(
-        lattice_shape=lattice_shape,
-        groups={'su3': 3, 'su2': 2, 'u1': 1},
-        betas={'su3': 6.0, 'su2': 4.0, 'u1': 5.0},
-    )
-    history = model.find_vacuum(steps=steps)
-    plot_qcd_action_landscape(history, PLOTS / "actions.png")
+    smc = StandardModelHMC(lattice_shape=lattice_shape, groups={'su3': 3},
+                           betas={'su3': beta_su3}, eps=0.15, n_leapfrog=10)
+    history = smc.run(n_traj=n_traj, warmup=warmup, sample_every=sample_every)
+    u_samples = [smc.full_links(s)['su3'] for s in history['samples']]
+    print(f"\nEnsemble: {len(u_samples)} configs | "
+          f"acceptance {history['acceptance_rate']:.2f}")
 
-    measure_rho_parameter(model)
+    p_mean, p_err = jackknife_mean(history['plaquette']['su3'])
+    print(f"<P> = {p_mean:.4f} +/- {p_err:.4f}")
 
-    potential = measure_cornell_potential(model, r_max=5)
-    r_values = list(potential.keys())
-    v_values = list(potential.values())
+    phi_zero = smc._phi_background
+    dirac = WilsonDiracOperator(y=0.0, bare_mass=bare_mass)
 
-    plt.figure(figsize=(8, 5))
-    plt.plot(r_values, v_values, 'o-', label="Simulated Potential")
-    slope, intercept = np.polyfit(r_values[1:], v_values[1:], 1)
-    plt.plot(r_values, [slope * x + intercept for x in r_values], '--',
-             label=f"String Tension (sigma) ~ {slope:.3f}")
-    plt.xlabel("Distance R (Lattice Units)")
-    plt.ylabel("Potential V(R)")
-    plt.title("SU(3) Quark Confinement (Cornell Potential)")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(PLOTS / "confinement.png")
-    plt.close()
+    # --- Cornell potential + string tension vs the 2D area-law prediction ---
+    t_fixed = 2
+    potential = ensemble_cornell_potential(u_samples, lattice_shape,
+                                           smc.edge_index, r_max=3, t_fixed=t_fixed)
+    sigma, sigma_err = fit_string_tension(potential)
+    sigma_area_law = -np.log(max(p_mean, 1e-12))
+    print("\nCornell potential (T = 2):")
+    for r, (v, e) in potential.items():
+        print(f"  V({r}) = {v:.4f} +/- {e:.4f}")
+    print(f"string tension sigma = {sigma:.4f} +/- {sigma_err:.4f} "
+          f"| 2D area law -ln<P> = {sigma_area_law:.4f}")
 
-    pion_signal = measure_pion_mass(model, max_dist=12)
-    r_vals = list(pion_signal.keys())
-    log_c_vals = np.log(list(pion_signal.values()))
+    # --- Pion correlator and mass ---
+    correlators = [
+        pion_correlator(dirac, phi_zero, u, smc.edge_index, smc.edge_dirs,
+                        smc.is_fwd, lattice_shape, max_dist=6)
+        for u in u_samples
+    ]
+    mean_corr, m_pi, m_pi_err = ensemble_pion_mass(correlators)
+    print(f"\npion mass m_pi = {m_pi:.4f} +/- {m_pi_err:.4f} "
+          f"(bare quark mass {bare_mass})")
 
-    plt.figure(figsize=(8, 5))
-    plt.plot(r_vals, log_c_vals, 'o-', color='red', label="ln(Correlator)")
-    # skip r = 1, 2 to dodge short-range lattice artifacts
-    fit_start = 2
-    slope, intercept = np.polyfit(r_vals[fit_start:], log_c_vals[fit_start:], 1)
-    plt.plot(r_vals, [slope * x + intercept for x in r_vals], 'k--',
-             label=f"Fit Mass (m_pi) ~ {-slope:.3f}")
-    plt.xlabel("Distance r (Lattice Units)")
-    plt.ylabel("ln(C(r))")
-    plt.title("Pion Mass Extraction (Quark Propagator Decay)")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(PLOTS / "pion_mass.png")
-    plt.close()
+    # --- Chiral condensate ---
+    torch.manual_seed(1)
+    cond_vals = [
+        chiral_condensate_sample(dirac, phi_zero, u, smc.edge_index,
+                                 smc.edge_dirs, smc.is_fwd)
+        for u in u_samples
+    ]
+    cond, cond_err = ensemble_chiral_condensate(cond_vals)
+    print(f"<psi_bar psi> = {cond:.4f} +/- {cond_err:.4f}")
 
-    measure_chiral_condensate(model)
+    # --- GMOR: m_pi(m_q) on the same ensemble ---
+    gmor = ensemble_gmor(u_samples, phi_zero, lattice_shape, smc.edge_index,
+                         smc.edge_dirs, smc.is_fwd,
+                         quark_masses=[0.05, 0.10, 0.15, 0.20, 0.25])
+    print("\nGMOR sweep:")
+    for mq, m, e in gmor:
+        print(f"  m_q = {mq:.2f} -> m_pi = {m:.4f} +/- {e:.4f}")
 
-    test_masses, pion_masses = run_gmor_test(model)
-    m_pi_sq = [m ** 2 for m in pion_masses]
+    # --- Plots ---
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-    plt.figure(figsize=(7, 5))
-    plt.plot(test_masses, m_pi_sq, 'bo-', label=r"$m_\pi^2$")
-    slope, intercept = np.polyfit(test_masses, m_pi_sq, 1)
-    plt.plot(test_masses, [slope * x + intercept for x in test_masses], 'r--',
-             label=f"Fit: y = {slope:.2f}x + {intercept:.3f}")
-    plt.xlabel("Input Quark Mass ($m_q$)")
-    plt.ylabel(r"Pion Mass Squared ($m_\pi^2$)")
-    plt.title("GMOR Relation Verification")
-    plt.grid(True)
-    plt.legend()
-    plt.savefig(PLOTS / "gmor.png")
-    plt.close()
+    rs = list(potential.keys())
+    vs = [potential[r][0] for r in rs]
+    es = [potential[r][1] for r in rs]
+    axes[0].errorbar(rs, vs, yerr=es, fmt='o-', capsize=3, label='ensemble V(R)')
+    axes[0].plot(rs, [sigma_area_law * r for r in rs], 'r--',
+                 label=r'2D area law $-\ln\langle P\rangle \cdot R$')
+    axes[0].set_title("Static potential (Cornell)")
+    axes[0].set_xlabel("R")
+    axes[0].set_ylabel("V(R)")
+    axes[0].grid(alpha=0.3)
+    axes[0].legend()
+
+    rr = list(mean_corr.keys())
+    axes[1].errorbar(rr, np.log(list(mean_corr.values())), fmt='o-',
+                     label='ln <C(r)>')
+    axes[1].set_title(rf"Pion correlator ($m_\pi$ = {m_pi:.3f} $\pm$ {m_pi_err:.3f})")
+    axes[1].set_xlabel("r")
+    axes[1].grid(alpha=0.3)
+    axes[1].legend()
+
+    mqs = [g[0] for g in gmor]
+    mpi_sq = [g[1] ** 2 for g in gmor]
+    mpi_sq_err = [2 * g[1] * g[2] for g in gmor]
+    axes[2].errorbar(mqs, mpi_sq, yerr=mpi_sq_err, fmt='bo-', capsize=3)
+    slope, intercept = np.polyfit(mqs, mpi_sq, 1)
+    axes[2].plot(mqs, [slope * m + intercept for m in mqs], 'r--',
+                 label=f"fit: {slope:.2f} m_q + {intercept:.3f}")
+    axes[2].set_title("GMOR relation on a fixed ensemble")
+    axes[2].set_xlabel(r"$m_q$")
+    axes[2].set_ylabel(r"$m_\pi^2$")
+    axes[2].grid(alpha=0.3)
+    axes[2].legend()
+
+    plt.tight_layout()
+    plt.savefig(PLOTS / "qcd_ensemble_observables.png", dpi=150)
+    plt.close(fig)
 
 
 if __name__ == "__main__":

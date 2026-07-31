@@ -1,10 +1,275 @@
+from collections.abc import Callable
+
 import numpy as np
 import torch
 from scipy.optimize import fsolve
 
-from src.dirac import conjugate_gradient, g5_spin_last
+from src.dirac import WilsonDiracOperator, conjugate_gradient, g5_spin_last
 from src.lattice import find_rectangular_loops
 
+# Observables are split into per-configuration kernels (take explicit field
+# tensors) and ensemble_* wrappers that average over HMC samples and attach
+# jackknife errors. Single-configuration numbers are for debugging only; the
+# ensemble versions are what plans and the report may cite.
+
+
+# ---------------------------------------------------------------------------
+# Jackknife
+# ---------------------------------------------------------------------------
+
+def jackknife_mean(values: list[float] | np.ndarray) -> tuple[float, float]:
+    v = np.asarray(values, dtype=float)
+    n = len(v)
+    if n < 2:
+        return float(v.mean()), float('nan')
+    jk = np.array([np.mean(np.delete(v, i)) for i in range(n)])
+    err = np.sqrt((n - 1) / n * np.sum((jk - jk.mean()) ** 2))
+    return float(v.mean()), float(err)
+
+
+def jackknife_transformed(
+    values: list[float] | np.ndarray,
+    fn: Callable[[float], float],
+) -> tuple[float, float]:
+    """Jackknife error of fn(mean(values)) for a nonlinear fn (e.g. -log)."""
+    v = np.asarray(values, dtype=float)
+    n = len(v)
+    center = float(fn(v.mean()))
+    if n < 2:
+        return center, float('nan')
+    jk = np.array([fn(np.mean(np.delete(v, i))) for i in range(n)])
+    err = np.sqrt((n - 1) / n * np.sum((jk - jk.mean()) ** 2))
+    return center, float(err)
+
+
+def jackknife_columns(
+    rows: np.ndarray,
+    fn: Callable[[np.ndarray], float],
+) -> tuple[float, float]:
+    """Jackknife for a statistic fn computed from the column-mean of a
+    [samples, features] array (e.g. a fit through an averaged correlator)."""
+    n = rows.shape[0]
+    center = float(fn(rows.mean(axis=0)))
+    if n < 2:
+        return center, float('nan')
+    jk = np.array([fn(np.delete(rows, i, axis=0).mean(axis=0)) for i in range(n)])
+    err = np.sqrt((n - 1) / n * np.sum((jk - jk.mean()) ** 2))
+    return center, float(err)
+
+
+# ---------------------------------------------------------------------------
+# Per-configuration kernels
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def average_plaquette(u_gates: torch.Tensor, plaq_idx: torch.Tensor,
+                      group_dim: int) -> float:
+    """Mean Re Tr(U_p)/N over all plaquettes (reverse path composition,
+    matching WilsonAction)."""
+    u_p = u_gates[plaq_idx]
+    loop = u_p[:, 0]
+    for i in range(1, u_p.shape[1]):
+        loop = torch.matmul(u_p[:, i], loop)
+    tr = torch.einsum('pii -> p', loop).real
+    return (tr / group_dim).mean().item()
+
+
+@torch.no_grad()
+def wilson_loop_average(
+    u_gates: torch.Tensor,
+    lattice_shape: tuple[int, ...],
+    edge_index: torch.Tensor,
+    R: int,
+    T: int,
+) -> float:
+    """Mean Re Tr(W_{RxT})/N over all positions and orientations."""
+    loop_idx = find_rectangular_loops(lattice_shape, edge_index, R=R, T=T)
+    return average_plaquette(u_gates, loop_idx, u_gates.size(-1))
+
+
+@torch.no_grad()
+def pion_correlator(
+    dirac: WilsonDiracOperator,
+    phi: torch.Tensor,
+    u_su3: torch.Tensor,
+    edge_index: torch.Tensor,
+    edge_dirs: torch.Tensor,
+    is_fwd: torch.Tensor,
+    lattice_shape: tuple[int, ...],
+    max_dist: int = 8,
+    max_iter: int = 300,
+) -> dict[int, float]:
+    """C(r): point-source quark propagator magnitude, radially averaged over
+    Manhattan shells."""
+    num_nodes = int(np.prod(lattice_shape))
+    source = torch.zeros(num_nodes, 3, 4, dtype=torch.complex64,
+                         device=u_su3.device)
+    center_coords = [d // 2 for d in lattice_shape]
+    center_node = int(np.ravel_multi_index(center_coords, lattice_shape))
+    source[center_node] = 1.0 + 0.0j
+
+    x = conjugate_gradient(dirac, source, phi, edge_index, edge_dirs, u_su3,
+                           is_fwd, max_iter=max_iter, tol=1e-6)
+    correlator = torch.sum(x.abs() ** 2, dim=(-1, -2)).cpu()
+
+    grid = np.indices(lattice_shape)
+    center_arr = np.array(center_coords).reshape([-1] + [1] * len(lattice_shape))
+    distances = np.sum(np.abs(grid - center_arr), axis=0).flatten()
+
+    C_r = {}
+    for r in range(1, max_dist + 1):
+        mask = (distances == r)
+        if mask.any():
+            C_r[r] = correlator[mask].mean().item()
+    return C_r
+
+
+@torch.no_grad()
+def chiral_condensate_sample(
+    dirac: WilsonDiracOperator,
+    phi: torch.Tensor,
+    u_su3: torch.Tensor,
+    edge_index: torch.Tensor,
+    edge_dirs: torch.Tensor,
+    is_fwd: torch.Tensor,
+    num_noise_vectors: int = 3,
+) -> float:
+    """<psi_bar psi> on one configuration via a Z2 stochastic trace."""
+    num_nodes = phi.size(0)
+    total = 0.0
+    for _ in range(num_noise_vectors):
+        shape = (num_nodes, 3, 4)
+        noise = torch.randint(0, 2, shape, device=u_su3.device).float() * 2 - 1
+        noise = noise + 1j * (torch.randint(0, 2, shape,
+                                            device=u_su3.device).float() * 2 - 1)
+        noise = (noise / np.sqrt(2)).to(torch.complex64)
+
+        x = conjugate_gradient(dirac, noise, phi, edge_index, edge_dirs, u_su3,
+                               is_fwd, max_iter=200)
+        # D^dag x = D^-1 noise, using D^dag = g5 D g5
+        g5_x = g5_spin_last(dirac.g5, x)
+        d_g5_x = dirac(g5_x, phi, edge_index, edge_dirs, u_su3, is_fwd)
+        d_dag_x = g5_spin_last(dirac.g5, d_g5_x)
+        total += torch.sum(noise.conj() * d_dag_x).real.item()
+
+    return total / (num_noise_vectors * num_nodes * 3 * 4)
+
+
+# ---------------------------------------------------------------------------
+# Ensemble observables (HMC samples in, central values with errors out)
+# ---------------------------------------------------------------------------
+
+def ensemble_cornell_potential(
+    u_samples: list[torch.Tensor],
+    lattice_shape: tuple[int, ...],
+    edge_index: torch.Tensor,
+    r_max: int = 4,
+    t_fixed: int = 2,
+) -> dict[int, tuple[float, float]]:
+    """V(R) = -(1/T) ln <W(R,T)> with jackknife errors from the ensemble."""
+    potential = {}
+    for r in range(1, r_max + 1):
+        w_vals = [wilson_loop_average(u, lattice_shape, edge_index, r, t_fixed)
+                  for u in u_samples]
+        potential[r] = jackknife_transformed(
+            w_vals, lambda m: -(1.0 / t_fixed) * np.log(max(m, 1e-12)))
+    return potential
+
+
+def fit_string_tension(
+    potential: dict[int, tuple[float, float]],
+) -> tuple[float, float]:
+    """Linear fit V(R) = c + sigma R; the naive error propagates the V errors."""
+    rs = np.array(sorted(potential.keys()), dtype=float)
+    vs = np.array([potential[int(r)][0] for r in rs])
+    errs = np.array([potential[int(r)][1] for r in rs])
+    sigma, _ = np.polyfit(rs, vs, 1)
+    denom = np.sqrt(np.sum((rs - rs.mean()) ** 2))
+    sigma_err = float(np.sqrt(np.mean(errs ** 2)) / max(denom, 1e-12))
+    return float(sigma), sigma_err
+
+
+def ensemble_pion_mass(
+    correlators: list[dict[int, float]],
+    fit_start: int = 1,
+    fit_stop: int = 5,
+) -> tuple[dict[int, float], float, float]:
+    """Effective mass from the log-slope of the ensemble-averaged correlator,
+    jackknifed over configurations."""
+    rs = sorted(set.intersection(*(set(c.keys()) for c in correlators)))
+    rows = np.array([[c[r] for r in rs] for c in correlators])
+    sl = slice(fit_start, min(fit_stop, len(rs)))
+    rs_arr = np.array(rs, dtype=float)
+
+    def fit(mean_c: np.ndarray) -> float:
+        slope, _ = np.polyfit(rs_arr[sl], np.log(np.maximum(mean_c[sl], 1e-30)), 1)
+        return -slope
+
+    mass, err = jackknife_columns(rows, fit)
+    mean_correlator = dict(zip(rs, rows.mean(axis=0)))
+    return mean_correlator, mass, err
+
+
+def ensemble_chiral_condensate(values: list[float]) -> tuple[float, float]:
+    return jackknife_mean(values)
+
+
+def ensemble_gmor(
+    u_samples: list[torch.Tensor],
+    phi: torch.Tensor,
+    lattice_shape: tuple[int, ...],
+    edge_index: torch.Tensor,
+    edge_dirs: torch.Tensor,
+    is_fwd: torch.Tensor,
+    quark_masses: list[float],
+    yukawa: float = 0.0,
+    max_dist: int = 6,
+) -> list[tuple[float, float, float]]:
+    """GMOR check on a fixed (quenched) ensemble: m_pi(m_q) with errors,
+    measured with the same configurations at every quark mass."""
+    results = []
+    for mq in quark_masses:
+        dirac = WilsonDiracOperator(y=yukawa, bare_mass=mq)
+        correlators = [
+            pion_correlator(dirac, phi, u, edge_index, edge_dirs, is_fwd,
+                            lattice_shape, max_dist=max_dist)
+            for u in u_samples
+        ]
+        _, m_pi, err = ensemble_pion_mass(correlators)
+        results.append((mq, m_pi, err))
+    return results
+
+
+def ensemble_electroweak_masses(
+    phi_samples: list[torch.Tensor],
+    u_su2_samples: list[torch.Tensor],
+    u_u1_samples: list[torch.Tensor],
+    edge_index: torch.Tensor,
+    is_fwd: torch.Tensor,
+    higgs_calc,
+    g_su2: float = 1.0,
+    g_u1: float = 0.5,
+) -> dict:
+    """Align every configuration to unitary gauge, measure W/Z/photon masses
+    on each, and jackknife over the ensemble."""
+    per_sample = {'W Boson': [], 'Z Boson': [], 'Photon': [], 'rho': [], 'vev': []}
+
+    for phi, u2, u1 in zip(phi_samples, u_su2_samples, u_u1_samples):
+        phi_a, u2_a, u1_a = align_to_unitary_gauge(phi, edge_index, u2, u1)
+        stats = measure_electroweak_masses(
+            phi_a, u2_a, u1_a, edge_index, is_fwd, higgs_calc,
+            g_su2=g_su2, g_u1=g_u1, verbose=False)
+        for name in ('W Boson', 'Z Boson', 'Photon'):
+            per_sample[name].append(stats['masses'][name])
+        per_sample['rho'].append(stats['rho'])
+        per_sample['vev'].append(torch.norm(phi, dim=-1).mean().item())
+
+    return {key: jackknife_mean(vals) for key, vals in per_sample.items()}
+
+
+# ---------------------------------------------------------------------------
+# Electroweak sector
+# ---------------------------------------------------------------------------
 
 @torch.no_grad()
 def align_to_unitary_gauge(
@@ -50,13 +315,12 @@ def measure_electroweak_masses(
     g_su2: float = 1.0,
     g_u1: float = 0.5,
     eps: float = 1e-3,
+    verbose: bool = True,
 ) -> dict:
-    print("\n--- Measuring Electroweak Boson Masses ---")
     device = phi_vac.device
     num_edges = u_su2_vac.shape[0]
 
     theta_w_theory = np.arctan(g_u1 / g_su2)
-    print(f"Theoretical Weinberg Angle (theta_W): {np.degrees(theta_w_theory):.2f} deg")
 
     tau_1 = torch.tensor([[0, 1], [1, 0]], dtype=torch.complex64, device=device)
     tau_3 = torch.tensor([[1, 0], [0, -1]], dtype=torch.complex64, device=device)
@@ -85,7 +349,8 @@ def measure_electroweak_masses(
         delta_s_per_edge = (s_new - s_base) / num_fwd_edges
         mass = np.sqrt(max(0, 2 * delta_s_per_edge) / (eps ** 2))
         masses[name] = mass
-        print(f"{name:8} Mass: {mass:.4f}")
+        if verbose:
+            print(f"{name:8} Mass: {mass:.4f}")
 
     mw, mz, ma = masses["W Boson"], masses["Z Boson"], masses["Photon"]
 
@@ -100,15 +365,14 @@ def measure_electroweak_masses(
     else:
         theta_w_measured = 0.0
 
-    print("\n--- Physical Parameter Estimates ---")
-    print(f"Measured Rho parameter:  {rho_measured:.6f} (Theory: 1.0)")
-    print(f"Measured Weinberg Angle: {np.degrees(theta_w_measured):.2f} deg "
-          f"(Theory: {np.degrees(theta_w_theory):.2f} deg)")
-
-    if abs(rho_measured - 1.0) < 0.05 and ma < 1e-2:
-        print("SUCCESS: custodial symmetry preserved (rho ~ 1), photon massless.")
-    else:
-        print("WARNING: significant deviation in rho or the photon mass.")
+    if verbose:
+        print(f"Measured Rho parameter:  {rho_measured:.6f} (Theory: 1.0)")
+        print(f"Measured Weinberg Angle: {np.degrees(theta_w_measured):.2f} deg "
+              f"(Theory: {np.degrees(theta_w_theory):.2f} deg)")
+        if abs(rho_measured - 1.0) < 0.05 and ma < 1e-2:
+            print("SUCCESS: custodial symmetry preserved (rho ~ 1), photon massless.")
+        else:
+            print("WARNING: significant deviation in rho or the photon mass.")
 
     return {
         "masses": masses,
@@ -118,166 +382,9 @@ def measure_electroweak_masses(
     }
 
 
-@torch.no_grad()
-def measure_rho_parameter(model) -> float:
-    # lattice mapping: beta_su2 = 4/g^2, beta_u1 = 1/g'^2
-    g_sq = 4.0 / model.betas['su2']
-    gp_sq = 1.0 / model.betas['u1']
-    cos_sq_theta_w = g_sq / (g_sq + gp_sq)
-
-    current_vev_sq = torch.sum(model.phi.abs() ** 2, dim=-1).mean().item()
-    mw_sq = 0.25 * g_sq * current_vev_sq
-    mz_sq = 0.25 * (g_sq + gp_sq) * current_vev_sq
-    rho = mw_sq / (mz_sq * cos_sq_theta_w)
-
-    print("\n--- Electroweak Health Check ---")
-    print(f"Weinberg Angle (cos^2 theta_w): {cos_sq_theta_w:.4f}")
-    print(f"Measured Rho Parameter: {rho:.6f}")
-    return rho
-
-
-@torch.no_grad()
-def measure_cornell_potential(model, r_max: int = 6, t_fixed: int = 4) -> dict:
-    """Static quark potential V(R) from R x T Wilson loops; a linear rise
-    signals confinement."""
-    model.eval()
-    u_su3 = model.physical_gates()['su3']
-    V_R = {}
-
-    print("\n--- Measuring Cornell Potential (SU3) ---")
-    for r in range(1, r_max + 1):
-        loop_idx = find_rectangular_loops(model.lattice_shape, model.edge_index,
-                                          R=r, T=t_fixed)
-        u_p = u_su3[loop_idx]
-        # reverse path order so the trace is gauge invariant
-        loop_prod = u_p[:, 0]
-        for i in range(1, u_p.shape[1]):
-            loop_prod = torch.matmul(u_p[:, i], loop_prod)
-
-        trace = torch.einsum('pii -> p', loop_prod).real / 3.0
-        w_rt = trace.mean().item()
-
-        v_r = -(1.0 / t_fixed) * np.log(max(w_rt, 1e-9))
-        V_R[r] = v_r
-        print(f"Distance R={r} | W(R,T)={w_rt:.4f} | V(R)={v_r:.4f}")
-
-    return V_R
-
-
-@torch.no_grad()
-def measure_pion_mass(model, max_dist: int = 10, max_iter: int = 300) -> dict:
-    """Pion correlator C(r) from a point-source quark propagator."""
-    model.eval()
-    u_su3 = model.physical_gates()['su3']
-
-    print("\n--- Measuring Pion Mass (Quark Propagator) ---")
-    source = torch.zeros_like(model.pf_phi)
-    dims = model.lattice_shape
-    center_coords = [d // 2 for d in dims]
-    center_node = int(np.ravel_multi_index(center_coords, dims))
-    source[center_node] = 1.0 + 0.0j
-
-    x = conjugate_gradient(
-        model.fermion_calc.dirac, source, model.phi, model.edge_index,
-        model.edge_dirs, u_su3, model.is_fwd, max_iter=max_iter, tol=1e-6)
-
-    correlator = torch.sum(x.abs() ** 2, dim=(-1, -2)).cpu()
-
-    grid = np.indices(dims)
-    reshape_args = [-1] + [1] * len(dims)
-    center_arr = np.array(center_coords).reshape(*reshape_args)
-    distances = np.sum(np.abs(grid - center_arr), axis=0).flatten()
-
-    C_r = {}
-    for r in range(1, max_dist + 1):
-        mask = (distances == r)
-        if mask.any():
-            mean_signal = correlator[mask].mean().item()
-            C_r[r] = mean_signal
-            print(f"Distance r={r} | C(r)={mean_signal:.4e}")
-
-    return C_r
-
-
-@torch.no_grad()
-def measure_chiral_condensate(model, num_noise_vectors: int = 5) -> float:
-    """<psi_bar psi> via a stochastic trace estimator with Z2 noise."""
-    model.eval()
-    u_su3 = model.physical_gates()['su3']
-    dirac = model.fermion_calc.dirac
-
-    print("\n--- Measuring Chiral Condensate ---")
-    condensate_sum = 0.0
-
-    for _ in range(num_noise_vectors):
-        noise = torch.randint(0, 2, model.pf_phi.shape, device=model.device).float() * 2 - 1
-        noise = noise + 1j * (torch.randint(0, 2, model.pf_phi.shape,
-                                            device=model.device).float() * 2 - 1)
-        noise = noise / np.sqrt(2)
-
-        x = conjugate_gradient(dirac, noise, model.phi, model.edge_index,
-                               model.edge_dirs, u_su3, model.is_fwd, max_iter=200)
-
-        # D^dag x = D^-1 noise, using D^dag = g5 D g5
-        g5_x = g5_spin_last(dirac.g5, x)
-        d_g5_x = dirac(g5_x, model.phi, model.edge_index, model.edge_dirs,
-                       u_su3, model.is_fwd)
-        d_dag_x = g5_spin_last(dirac.g5, d_g5_x)
-
-        condensate_sum += torch.sum(noise.conj() * d_dag_x).real.item()
-
-    V = int(np.prod(model.lattice_shape))
-    condensate = condensate_sum / (num_noise_vectors * V * 3 * 4)
-    print(f"<psi_bar psi> = {condensate:.6f}")
-    return condensate
-
-
-def run_gmor_test(
-    model, test_masses: list[float] | None = None, max_dist: int = 8,
-) -> tuple[list[float], list[float]]:
-    """Gell-Mann-Oakes-Renner check: m_pi^2 should rise linearly with m_q."""
-    print("\n=== Starting GMOR Chiral Test ===")
-    test_masses = test_masses or [0.05, 0.10, 0.15, 0.20, 0.25]
-    pion_masses = []
-
-    for mq in test_masses:
-        model.fermion_calc.dirac.bare_mass = mq
-        pion_signal = measure_pion_mass(model, max_dist=max_dist)
-
-        r_vals = list(pion_signal.keys())
-        log_c = np.log(list(pion_signal.values()))
-        # fit r = 2..6 to dodge short-range lattice artifacts and edge noise
-        slope, _ = np.polyfit(r_vals[1:6], log_c[1:6], 1)
-        pion_masses.append(-slope)
-
-    return test_masses, pion_masses
-
-
 # ---------------------------------------------------------------------------
-# Ensemble statistics
+# Miscellaneous ensemble statistics
 # ---------------------------------------------------------------------------
-
-@torch.no_grad()
-def average_plaquette(u_gates: torch.Tensor, plaq_idx: torch.Tensor,
-                      group_dim: int) -> float:
-    """Mean Re Tr(U_p)/N over all plaquettes (reverse path composition,
-    matching WilsonAction)."""
-    u_p = u_gates[plaq_idx]
-    loop = u_p[:, 0]
-    for i in range(1, u_p.shape[1]):
-        loop = torch.matmul(u_p[:, i], loop)
-    tr = torch.einsum('pii -> p', loop).real
-    return (tr / group_dim).mean().item()
-
-
-def jackknife_mean(values: list[float] | np.ndarray) -> tuple[float, float]:
-    v = np.asarray(values, dtype=float)
-    n = len(v)
-    if n < 2:
-        return float(v.mean()), float('nan')
-    jk = np.array([np.mean(np.delete(v, i)) for i in range(n)])
-    err = np.sqrt((n - 1) / n * np.sum((jk - jk.mean()) ** 2))
-    return float(v.mean()), float(err)
 
 def calculate_polyakov_loop(u_su3: torch.Tensor, L: int) -> float:
     """Confinement order parameter, assuming the interleaved 2D edge layout."""
