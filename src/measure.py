@@ -14,8 +14,63 @@ from src.lattice import find_rectangular_loops
 
 
 # ---------------------------------------------------------------------------
-# Jackknife
+# Autocorrelation and jackknife
 # ---------------------------------------------------------------------------
+#
+# HMC configurations are a Markov chain, so consecutive measurements are
+# correlated and the plain jackknife (which assumes independence) underestimates
+# every error bar by sqrt(2 tau_int). All three jackknife helpers therefore
+# inflate their error by that factor, estimated from the series itself in
+# Monte-Carlo-time order. Inflation rather than block-binning because our
+# ensembles are O(10-100) configurations, where binning leaves too few blocks to
+# estimate a variance from; for a long chain the two agree.
+
+def autocorrelation(values: list[float] | np.ndarray,
+                    max_lag: int | None = None) -> np.ndarray:
+    """Normalized autocorrelation rho(t), rho(0) = 1, of a Monte-Carlo-ordered
+    series."""
+    v = np.asarray(values, dtype=float)
+    n = len(v)
+    if max_lag is None:
+        max_lag = n - 1
+    max_lag = min(max_lag, n - 1)
+    d = v - v.mean()
+    var = float(np.dot(d, d)) / n
+    if var <= 0.0:
+        return np.ones(1)
+    rho = np.array([np.dot(d[: n - t], d[t:]) / (n * var)
+                    for t in range(max_lag + 1)])
+    return rho
+
+
+def integrated_autocorrelation_time(values: list[float] | np.ndarray,
+                                    c: float = 5.0) -> tuple[float, int]:
+    """tau_int = 1/2 + sum_{t>=1} rho(t), truncated by the Madras-Sokal
+    self-consistent window (smallest W with W >= c tau_int(W)). An independent
+    series gives tau_int = 1/2, so the variance inflation 2 tau_int is 1."""
+    v = np.asarray(values, dtype=float)
+    if len(v) < 4:
+        return 0.5, 0
+    # lags beyond n/2 are estimated from too few pairs to carry signal
+    rho = autocorrelation(v, max_lag=len(v) // 2)
+    if len(rho) < 2:
+        return 0.5, 0
+    tau = 0.5 + np.cumsum(rho[1:])
+    satisfied = np.arange(1, len(tau) + 1) >= c * tau
+    if not satisfied.any():
+        # the chain is too short to resolve its own tau; the full available sum
+        # is then a lower bound on the true tau, and the error bar with it
+        window = len(tau) - 1
+    else:
+        window = int(np.argmax(satisfied))
+    return max(float(tau[window]), 0.5), int(window + 1)
+
+
+def autocorrelation_inflation(values: list[float] | np.ndarray) -> float:
+    """Factor by which an independence-assuming error bar must be multiplied."""
+    tau, _ = integrated_autocorrelation_time(values)
+    return float(np.sqrt(2.0 * tau))
+
 
 def jackknife_mean(values: list[float] | np.ndarray) -> tuple[float, float]:
     v = np.asarray(values, dtype=float)
@@ -24,7 +79,7 @@ def jackknife_mean(values: list[float] | np.ndarray) -> tuple[float, float]:
         return float(v.mean()), float('nan')
     jk = np.array([np.mean(np.delete(v, i)) for i in range(n)])
     err = np.sqrt((n - 1) / n * np.sum((jk - jk.mean()) ** 2))
-    return float(v.mean()), float(err)
+    return float(v.mean()), float(err * autocorrelation_inflation(v))
 
 
 def jackknife_transformed(
@@ -39,7 +94,7 @@ def jackknife_transformed(
         return center, float('nan')
     jk = np.array([fn(np.mean(np.delete(v, i))) for i in range(n)])
     err = np.sqrt((n - 1) / n * np.sum((jk - jk.mean()) ** 2))
-    return center, float(err)
+    return center, float(err * autocorrelation_inflation(v))
 
 
 def jackknife_columns(
@@ -54,7 +109,10 @@ def jackknife_columns(
         return center, float('nan')
     jk = np.array([fn(np.delete(rows, i, axis=0).mean(axis=0)) for i in range(n)])
     err = np.sqrt((n - 1) / n * np.sum((jk - jk.mean()) ** 2))
-    return center, float(err)
+    # the statistic mixes all columns, so take the slowest-decorrelating one
+    inflation = max(autocorrelation_inflation(rows[:, j])
+                    for j in range(rows.shape[1]))
+    return center, float(err * inflation)
 
 
 # ---------------------------------------------------------------------------

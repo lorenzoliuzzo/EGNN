@@ -12,7 +12,7 @@ import torch  # noqa: E402
 from scipy.special import iv  # noqa: E402
 
 from src.hmc import StandardModelHMC  # noqa: E402
-from src.measure import jackknife_mean  # noqa: E402
+from src.measure import integrated_autocorrelation_time, jackknife_mean  # noqa: E402
 
 PLOTS = Path(__file__).parent.parent / "plots"
 
@@ -28,10 +28,12 @@ def scan(group: str, dim: int, betas: list[float], shape: tuple[int, ...],
                                betas={group: beta}, eps=0.2, n_leapfrog=10)
         history = smc.run(n_traj=n_traj, warmup=warmup, log_every=0)
         mean, err = jackknife_mean(history['plaquette'][group])
+        tau, _ = integrated_autocorrelation_time(history['plaquette'][group])
         means.append(mean)
         errs.append(err)
         print(f"{group.upper()} beta={beta:5.2f} | <P> = {mean:.4f} +/- {err:.4f} "
-              f"| acc = {history['acceptance_rate']:.2f} | eps -> {smc.hmc.eps:.3f}")
+              f"| tau_int = {tau:5.2f} | acc = {history['acceptance_rate']:.2f} "
+              f"| eps -> {smc.hmc.eps:.3f}")
     return means, errs
 
 
