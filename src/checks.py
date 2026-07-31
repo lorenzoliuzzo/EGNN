@@ -414,7 +414,9 @@ def calculate_physics_observables(phi_su2, u_su2, p1, p2, p3, p4, L, lam, v_targ
 
     u1, u2 = u_su2[p1], u_su2[p2]
     u3, u4 = u_su2[p3], u_su2[p4]
-    u_p = u1 @ u2 @ u3 @ u4
+    # p3/p4 are the return legs of the loop: adjoints, reverse path order
+    # (same convention as wilson_plaquette_loss)
+    u_p = u4.mH @ u3.mH @ u2 @ u1
     tr_u_p = torch.real(torch.diagonal(u_p, dim1=-2, dim2=-1).sum(-1))
     
     avg_plaquette = torch.mean(tr_u_p / 2.0).item()

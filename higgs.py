@@ -40,7 +40,9 @@ def create_lattice(shape, a=1):
     # 3. THE OPTIMIZATION: Sort edges by Direction, then Forward/Backward
     # This guarantees contiguous memory chunks for the GPU
     sort_keys = dirs_t * 2 + (~fwd_t).long()
-    sorted_idx = torch.argsort(sort_keys)
+    # stable=True keeps nodes in order inside each (dir, fwd) block; the
+    # e = d*2V + node indexing in find_rectangular_loops depends on it
+    sorted_idx = torch.argsort(sort_keys, stable=True)
     
     srcs_sorted = srcs_t[sorted_idx]
     dsts_sorted = dsts_t[sorted_idx]

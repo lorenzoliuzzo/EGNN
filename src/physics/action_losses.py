@@ -19,8 +19,10 @@ def wilson_plaquette_loss(u_gate, p1, p2, p3, p4):
     u1, u2 = u_gate[p1], u_gate[p2]
     u3, u4 = u_gate[p3], u_gate[p4]
 
-    # Path: Forward -> Forward -> Backward (mH) -> Backward (mH)
-    u_p = u1 @ u2 @ u3.mH @ u4.mH
+    # Closed loop n00 -> n10 -> n11 -> n01 -> n00 composed in reverse path order
+    # (transport acts on column vectors), so the trace telescopes under
+    # U'_e = G_dst U_e G_src^dag
+    u_p = u4.mH @ u3.mH @ u2 @ u1
     
     # Re(Tr(U_p))
     tr_u_p = torch.real(torch.einsum('...ii->...', u_p))

@@ -40,7 +40,9 @@ def create_lattice(shape, a=1):
     # 3. THE OPTIMIZATION: Sort edges by Direction, then Forward/Backward
     # This guarantees contiguous memory chunks for the GPU
     sort_keys = dirs_t * 2 + (~fwd_t).long()
-    sorted_idx = torch.argsort(sort_keys)
+    # stable=True keeps nodes in order inside each (dir, fwd) block; the
+    # e = d*2V + node indexing in find_rectangular_loops depends on it
+    sorted_idx = torch.argsort(sort_keys, stable=True)
     
     srcs_sorted = srcs_t[sorted_idx]
     dsts_sorted = dsts_t[sorted_idx]
@@ -359,7 +361,9 @@ class StandardModelGNN(nn.Module):
 
         # D. Higgs local term (Standard discrete derivative formulation)
         # D_mu phi = (phi(x) - U phi(x-mu))/a
-        out_dict['higgs'] = (dim_space / self.a) * phi - transported_dict['higgs']
+        # Each direction contributes twice (+mu and -mu edges), so the local
+        # coefficient of the covariant Laplacian is 2 * dims
+        out_dict['higgs'] = (2 * dim_space / self.a) * phi - transported_dict['higgs']
 
         return out_dict
 
@@ -533,11 +537,12 @@ class WilsonAction(nn.Module):
         # Shape: [Num_Plaquettes, 4, dim, dim]
         u_p = u_gates[self.plaq_idx]
         
-        # Matrix multiply around the loop: U1 * U2 * U3 * U4
-        # We can use a loop over the 4 edges of the plaquette
+        # Compose in reverse path order: U_e psi transports column vectors, so the
+        # closed-loop transport is U_e4 U_e3 U_e2 U_e1 and its trace telescopes
+        # under a gauge transformation U'_e = G_dst U_e G_src^dag
         loop = u_p[:, 0]
         for i in range(1, 4):
-            loop = torch.matmul(loop, u_p[:, i])
+            loop = torch.matmul(u_p[:, i], loop)
         tr = torch.einsum('pii -> p', loop)
         
         # 4. Final Scalar calculation
@@ -640,14 +645,15 @@ class HeteroQuantumVacuum(nn.Module):
         with torch.no_grad():
             for p in parameters:
                 if p.grad is None: continue
-                
-                force = p.grad.resolve_conj()
-                noise = torch.randn_like(p)
-                grad = p.grad.resolve_conj()
-                grad_norm = torch.norm(grad)
-                if grad_norm > 10.0:
-                    grad = grad * (10.0 / grad_norm)
 
+                # Clip the force so a single stiff gradient cannot blow up the
+                # Euler-Maruyama step
+                force = p.grad.resolve_conj()
+                force_norm = torch.norm(force)
+                if force_norm > 10.0:
+                    force = force * (10.0 / force_norm)
+
+                noise = torch.randn_like(p)
                 if p.is_complex():
                     noise_imag = torch.randn_like(p)
                     # Complex noise variance is split across real and imaginary

@@ -45,7 +45,9 @@ def create_lattice(shape):
     # 3. THE OPTIMIZATION: Sort edges by Direction, then Forward/Backward
     # This guarantees contiguous memory chunks for the GPU
     sort_keys = dirs_t * 2 + (~fwd_t).long()
-    sorted_idx = torch.argsort(sort_keys)
+    # stable=True keeps nodes in order inside each (dir, fwd) block; the
+    # e = d*2V + node indexing in find_rectangular_loops depends on it
+    sorted_idx = torch.argsort(sort_keys, stable=True)
     
     srcs_sorted = srcs_t[sorted_idx]
     dsts_sorted = dsts_t[sorted_idx]
@@ -147,11 +149,12 @@ class WilsonAction(nn.Module):
         # Shape: [Num_Plaquettes, 4, dim, dim]
         u_p = u_gates[self.plaq_idx]
         
-        # Matrix multiply around the loop: U1 * U2 * U3 * U4
-        # We can use a loop over the 4 edges of the plaquette
+        # Compose in reverse path order: U_e psi transports column vectors, so the
+        # closed-loop transport is U_e4 U_e3 U_e2 U_e1 and its trace telescopes
+        # under a gauge transformation U'_e = G_dst U_e G_src^dag
         loop = u_p[:, 0]
         for i in range(1, 4):
-            loop = torch.matmul(loop, u_p[:, i])
+            loop = torch.matmul(u_p[:, i], loop)
         tr = torch.einsum('pii -> p', loop)
         
         # 4. Final Scalar calculation
@@ -297,7 +300,9 @@ def measure_electroweak_masses(phi_vac, u_su2_vac, u_u1_vac, edge_index, is_fwd,
             s_new = higgs_calc(phi_vac, edge_index, is_fwd, u_eps_all, u_u1_pure).item()
                 
         # 5. Extract the mass
-        delta_s_per_edge = (s_new - s_base) / num_edges
+        # The kinetic action only sums forward edges, so normalize per forward edge
+        num_fwd_edges = int(is_fwd.sum().item())
+        delta_s_per_edge = (s_new - s_base) / num_fwd_edges
         mass = np.sqrt(max(0, 2 * delta_s_per_edge) / (eps**2))
         masses[name] = mass
         

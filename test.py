@@ -39,7 +39,9 @@ def create_lattice(shape):
     # 3. THE OPTIMIZATION: Sort edges by Direction, then Forward/Backward
     # This guarantees contiguous memory chunks for the GPU
     sort_keys = dirs_t * 2 + (~fwd_t).long()
-    sorted_idx = torch.argsort(sort_keys)
+    # stable=True keeps nodes in order inside each (dir, fwd) block; the
+    # e = d*2V + node indexing in find_rectangular_loops depends on it
+    sorted_idx = torch.argsort(sort_keys, stable=True)
     
     srcs_sorted = srcs_t[sorted_idx]
     dsts_sorted = dsts_t[sorted_idx]
@@ -163,11 +165,12 @@ class WilsonAction(nn.Module):
         # Shape: [Num_Plaquettes, 4, dim, dim]
         u_p = u_gates[self.plaq_idx]
         
-        # Matrix multiply around the loop: U1 * U2 * U3 * U4
-        # We can use a loop over the 4 edges of the plaquette
+        # Compose in reverse path order: U_e psi transports column vectors, so the
+        # closed-loop transport is U_e4 U_e3 U_e2 U_e1 and its trace telescopes
+        # under a gauge transformation U'_e = G_dst U_e G_src^dag
         loop = u_p[:, 0]
         for i in range(1, 4):
-            loop = torch.matmul(loop, u_p[:, i])
+            loop = torch.matmul(u_p[:, i], loop)
         tr = torch.einsum('pii -> p', loop)
         
         # 4. Final Scalar calculation
@@ -769,11 +772,12 @@ def measure_cornell_potential(model, r_max=6, t_fixed=4):
         # 1. Find all R x T loops on the lattice
         loop_idx = find_rectangular_loops(model.lattice_shape, model.edge_index, R=r, T=t_fixed)
         
-        # 2. Gather and multiply gates along the loop
+        # 2. Gather and multiply gates along the loop (reverse path order so the
+        # trace is gauge invariant, matching WilsonAction)
         u_p = u_su3[loop_idx] # [Num_Loops, 2R+2T, 3, 3]
         loop_prod = u_p[:, 0]
         for i in range(1, u_p.shape[1]):
-            loop_prod = torch.matmul(loop_prod, u_p[:, i])
+            loop_prod = torch.matmul(u_p[:, i], loop_prod)
             
         # 3. W(R, T) = 1/3 * Re(Tr(Loop))
         # Averaged over all positions and orientations
