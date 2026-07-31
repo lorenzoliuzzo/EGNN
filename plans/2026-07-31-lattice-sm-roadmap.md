@@ -100,8 +100,14 @@ Everything checked below is pinned by `tests/` or reproducible by a script in
 ## Validation milestones
 
 - [x] 2D U(1) average plaquette vs. the exact solution I1(b)/I0(b): matches
-      across beta in [0.25, 3] (pinned at beta=1 by `test_hmc.py`; full scan
-      in `benchmarks/hmc_plaquette_scan.py`)
+      across beta in [0.25, 3] — largest deviation 1.6 sigma, signs scattered
+      (0.1177(42) vs 0.1240 at beta=0.25, 0.4405(52) vs 0.4464 at beta=1.0,
+      0.6034(45) vs 0.5961 at beta=1.5). The earlier one-sided deficit was an
+      artefact of `scan()` reseeding to 0 before every beta, which correlated
+      the six points (r = 0.3-0.7); with distinct seeds and 2000 trajectories
+      it is gone. Sampler exactness verified independently — see
+      `research/2026-07-31-u1-plaquette-deficit.md`. (Pinned at beta=1 by
+      `test_hmc.py`; full scan in `benchmarks/hmc_plaquette_scan.py`.)
 - [x] 3D SU(2) plaquette: strong-coupling limit reproduced
       (<P> = 0.1257(30) vs beta/4 = 0.125 at beta = 0.5); full scan
       interpolates to the weak-coupling envelope
