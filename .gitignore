@@ -1,0 +1,8 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Generated lattice datasets (regenerate with dataset.py)
+sm_dataset/
+data/

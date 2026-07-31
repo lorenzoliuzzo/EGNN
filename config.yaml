@@ -1,0 +1,41 @@
+lattice:
+  L: 8
+  dims: 4
+  hidden_dim: 16
+  a_spacing: 0.125    # fm (lattice resolution)
+  v_target: 1.0       # dimensionless VEV for the potential
+
+fermions:
+  # Masses in GeV
+  m_e: 0.000511
+  m_mu: 0.1057
+  m_tau: 1.776
+  m_u: 0.00216
+  m_d: 0.00467
+  m_s: 0.093
+  m_c: 1.27
+  m_b: 4.18
+  m_t: 172.76
+
+mixing:
+  theta_12: 13.04     # degrees (Cabibbo angle)
+  theta_23: 2.38
+  theta_13: 0.201
+  delta_cp: 1.20      # radians
+
+gauge:
+  g1: 0.357           # U(1) Hypercharge coupling
+  g2: 0.652           # SU(2) Weak coupling
+  g3: 1.221           # SU(3) Strong coupling
+
+higgs:
+  v_phys: 246.0       # GeV
+  m_H: 125.09         # GeV
+
+training:
+  epochs: 5000
+  lr_nn: 0.005
+  lr_su3: 0.0001
+  lr_su2: 0.0005
+  lr_u1: 0.001
+  temperature: 0.002
