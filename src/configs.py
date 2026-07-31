@@ -1,5 +1,7 @@
-import yaml
 from dataclasses import dataclass, field
+
+import yaml
+
 
 @dataclass
 class LatticeConfig:
@@ -93,7 +95,7 @@ class SMConfig:
     @classmethod
     def from_yaml(cls, path: str):
         """Loads a nested YAML file and parses it into the dataclasses."""
-        with open(path, 'r') as f:
+        with open(path) as f:
             raw = yaml.safe_load(f)
             
         return cls(

@@ -1,0 +1,48 @@
+[project]
+name = "egnn-lattice-standard-model"
+version = "0.1.0"
+description = "Gauge-equivariant GNN simulations of lattice Standard Model field theory"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.4",
+    "torch_geometric>=2.5",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "matplotlib>=3.8",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# Nothing ships as a package: `pip install -e .` exists only to resolve the
+# dependencies above.
+py-modules = []
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# Pinned explicitly: ruff's implicit default set widens between releases, which
+# would turn an unrelated version bump into a red CI.
+select = ["E4", "E7", "E9", "F", "I", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Puts the repo root and tests/ on sys.path so tests import `src.*` and the
+# shared `helpers` module without an installed package.
+pythonpath = [".", "tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]

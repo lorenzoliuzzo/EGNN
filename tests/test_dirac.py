@@ -1,27 +1,26 @@
 import pytest
 import torch
 
-from src.models import WilsonDiracConv
-from src.physics.action_losses import (apply_D_dag_D, get_gamma_5,
-                                       pseudofermion_action,
-                                       solve_conjugate_gradient)
-from src.utils.lattice import get_pbc_edge_index
+from src.actions import pseudofermion_action
+from src.dirac import WilsonDiracConv, apply_D_dag_D, get_gamma_matrices, solve_conjugate_gradient
+from src.lattice import get_pbc_edge_index
 
 L, D = 4, 2
 N = L ** D
 
 
-def g5_spin(x):
-    return torch.einsum('ab,ncbf->ncaf', get_gamma_5('cpu'), x)
+def g5_spin(x: torch.Tensor) -> torch.Tensor:
+    _, g5 = get_gamma_matrices()
+    return torch.einsum('ab,ncbf->ncaf', g5, x)
 
 
-def rand_field(seed):
+def rand_field(seed: int) -> torch.Tensor:
     torch.manual_seed(seed)
     return torch.randn(N, 2, 4, 3, dtype=torch.complex64)
 
 
 @pytest.fixture(scope="module")
-def operator():
+def operator() -> tuple:
     torch.manual_seed(0)
     ei, ed = get_pbc_edge_index(L, D, 'cpu')
     E = ei.size(1)
@@ -33,7 +32,7 @@ def operator():
     return WilsonDiracConv(0.12, 'cpu'), ei, ed, u
 
 
-def test_wilson_dirac_gamma5_hermitian(operator):
+def test_wilson_dirac_gamma5_hermitian(operator: tuple) -> None:
     layer, ei, ed, u = operator
     x, y = rand_field(1), rand_field(2)
     lhs = torch.sum(torch.conj(y) * layer(x, ei, ed, u))
@@ -41,7 +40,7 @@ def test_wilson_dirac_gamma5_hermitian(operator):
     assert torch.allclose(lhs, rhs, rtol=1e-4)
 
 
-def test_ddagd_hermitian_and_positive(operator):
+def test_ddagd_hermitian_and_positive(operator: tuple) -> None:
     layer, ei, ed, u = operator
     x, y = rand_field(3), rand_field(4)
     Ax = apply_D_dag_D(x, ei, u, ed, layer)
@@ -51,7 +50,7 @@ def test_ddagd_hermitian_and_positive(operator):
     assert torch.sum(torch.conj(x) * Ax).real > 0
 
 
-def test_cg_solves_the_system(operator):
+def test_cg_solves_the_system(operator: tuple) -> None:
     layer, ei, ed, u = operator
     chi = rand_field(5)
     Y = solve_conjugate_gradient(layer, chi, ei, ed, u, tol=1e-6, max_iter=1000)
@@ -59,7 +58,7 @@ def test_cg_solves_the_system(operator):
     assert residual.abs().max() / chi.abs().max() < 1e-4
 
 
-def test_pseudofermion_action_identity_and_gradient(operator):
+def test_pseudofermion_action_identity_and_gradient(operator: tuple) -> None:
     # For chi = D^dag eta:  S = chi^dag (D^dag D)^-1 chi = |eta|^2 exactly
     layer, ei, ed, u = operator
     eta = rand_field(6)
