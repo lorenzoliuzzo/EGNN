@@ -24,6 +24,17 @@ from src.lattice import create_lattice, find_rectangular_loops
 # matching the kinetic term T = Tr(pi^2)/2. Scalars: T = |p|^2/2 with
 # Re/Im ~ N(0,1), and the real-coordinate force is exactly the packed grad.
 
+# Warmup step-size tuning: trajectories per adaptation window, the acceptance
+# the tuner steers toward, and the initial Robbins-Monro gain.
+#
+# The decaying gain needs room to converge: give it at least ~15 windows
+# (warmup >= 150). Below that the schedule is still shrinking when warmup ends
+# and eps stops short of target -- measured on SU(2) 4^3, warmup=60 leaves
+# acceptance at 0.86-0.95 against 0.73-0.80 at warmup=200.
+TUNE_WINDOW = 10
+TARGET_ACCEPT = 0.75
+TUNE_GAIN = 2.0
+
 
 def sample_link_momentum(u_fwd: torch.Tensor, is_su: bool) -> torch.Tensor:
     a = torch.randn_like(u_fwd)
@@ -292,7 +303,8 @@ class StandardModelHMC:
         log_every: int = 50,
         tune_eps: bool = True,
     ) -> dict:
-        history = {'dH': [], 'accept': [], 'plaquette': {k: [] for k in self.groups}}
+        history = {'dH': [], 'accept': [], 'eps': [],
+                   'plaquette': {k: [] for k in self.groups}}
         samples = []
 
         for t in range(n_traj):
@@ -300,15 +312,23 @@ class StandardModelHMC:
             history['dH'].append(dH)
             history['accept'].append(float(accept))
 
-            # adapt the step size during warmup only, so the sampling phase is
+            # Adapt the step size during warmup only, so the sampling phase is
             # a valid fixed-parameter chain; this also recovers from the
-            # cold-start trap where a too-coarse eps rejects every trajectory
-            if tune_eps and t < warmup and (t + 1) % 10 == 0:
-                recent = float(np.mean(history['accept'][-10:]))
-                if recent > 0.85:
-                    self.hmc.eps *= 1.15
-                elif recent < 0.6:
-                    self.hmc.eps *= 0.7
+            # cold-start trap where a too-coarse eps rejects every trajectory.
+            #
+            # Robbins-Monro on log eps with a decaying gain. The previous fixed
+            # 1.15/0.7 multipliers around a 0.6-0.85 dead band never settled:
+            # eps ratcheted up while acceptance stayed high, overshot into
+            # rejection, got cut 30%, and climbed again, so warmup ended at an
+            # arbitrary point of that limit cycle (eps spread +/-0.11 at
+            # beta=0.25, and acceptance as low as 0.55). A gain falling as
+            # 1/sqrt(k) converges instead.
+            if tune_eps and t < warmup and (t + 1) % TUNE_WINDOW == 0:
+                k = (t + 1) // TUNE_WINDOW
+                recent = float(np.mean(history['accept'][-TUNE_WINDOW:]))
+                gain = TUNE_GAIN / np.sqrt(k)
+                self.hmc.eps *= float(np.exp(gain * (recent - TARGET_ACCEPT)))
+                history['eps'].append(self.hmc.eps)
 
             if t >= warmup:
                 for name in self.groups:
@@ -322,6 +342,14 @@ class StandardModelHMC:
                 acc = float(np.mean(history['accept'][-log_every:]))
                 print(f"[HMC] traj {t:04d} | dH: {dH:+.4f} | acc(recent): {acc:.2f}")
 
-        history['acceptance_rate'] = float(np.mean(history['accept']))
+        # report the sampling phase only: averaging in the warmup mixes in the
+        # tuning transient, which is not a property of the chain being measured
+        sampling = history['accept'][warmup:] or history['accept']
+        history['acceptance_rate'] = float(np.mean(sampling))
         history['samples'] = samples
+
+        if history['acceptance_rate'] < 0.4:
+            print(f"[HMC] warning: acceptance {history['acceptance_rate']:.2f} "
+                  f"at eps={self.hmc.eps:.3f} -- the chain is barely moving and "
+                  f"observables will be biased toward the starting configuration")
         return history

@@ -1,9 +1,15 @@
+import numpy as np
 import pytest
 import torch
 from helpers import is_unitary
 from scipy.special import iv
 
-from src.hmc import StandardModelHMC, leapfrog, sample_link_momentum
+from src.hmc import (
+    TARGET_ACCEPT,
+    StandardModelHMC,
+    leapfrog,
+    sample_link_momentum,
+)
 from src.measure import jackknife_mean
 
 
@@ -122,3 +128,55 @@ def test_su2_strong_coupling_plaquette(beta: float) -> None:
     history = smc.run(n_traj=150, warmup=50, log_every=0)
     mean, _ = jackknife_mean(history['plaquette']['su2'])
     assert abs(mean - beta / 4) < 0.05, mean
+
+
+def test_eps_tuning_converges_to_target_acceptance() -> None:
+    # the tuner must land near TARGET_ACCEPT rather than wherever a limit
+    # cycle happened to be when warmup ended
+    torch.manual_seed(3)
+    smc = _pure_gauge('u1', 1, 1.0, (6, 6), eps=0.2, n_leapfrog=10)
+    history = smc.run(n_traj=350, warmup=150, log_every=0)
+    assert abs(history['acceptance_rate'] - TARGET_ACCEPT) < 0.15, (
+        history['acceptance_rate'], smc.hmc.eps)
+
+
+def test_eps_adaptation_decays_over_warmup() -> None:
+    # the defining property of the Robbins-Monro schedule, and what the old
+    # fixed 1.15/0.7 multipliers lacked: adjustments must shrink, or warmup
+    # ends wherever the limit cycle happened to be
+    torch.manual_seed(7)
+    smc = _pure_gauge('u1', 1, 1.0, (6, 6), eps=0.2, n_leapfrog=10)
+    history = smc.run(n_traj=200, warmup=200, log_every=0)
+
+    eps = np.array(history['eps'])
+    steps = np.abs(np.diff(np.log(eps)))
+    assert len(steps) >= 12, len(steps)
+    assert steps[-4:].mean() < 0.5 * steps[:4].mean(), steps
+
+
+def test_eps_tuning_recovers_from_a_far_too_large_step() -> None:
+    # eps=1.5 rejects essentially every trajectory from the cold start; warmup
+    # has to claw it back or the chain never leaves its starting configuration
+    torch.manual_seed(4)
+    smc = _pure_gauge('u1', 1, 3.0, (6, 6), eps=1.5, n_leapfrog=10)
+    history = smc.run(n_traj=350, warmup=150, log_every=0)
+    assert smc.hmc.eps < 0.6, smc.hmc.eps
+    assert history['acceptance_rate'] > 0.5, history['acceptance_rate']
+
+
+def test_eps_is_frozen_during_the_sampling_phase() -> None:
+    # tuning past warmup would make the sampling phase a moving-parameter chain
+    torch.manual_seed(5)
+    smc = _pure_gauge('u1', 1, 1.0, (4, 4), eps=0.2, n_leapfrog=10)
+    smc.run(n_traj=60, warmup=60, log_every=0)
+    tuned = smc.hmc.eps
+    smc.run(n_traj=60, warmup=0, log_every=0)
+    assert smc.hmc.eps == tuned
+
+
+def test_acceptance_rate_excludes_the_warmup_transient() -> None:
+    torch.manual_seed(6)
+    smc = _pure_gauge('u1', 1, 1.0, (4, 4), eps=0.2, n_leapfrog=10)
+    history = smc.run(n_traj=120, warmup=40, log_every=0, tune_eps=False)
+    sampling = float(np.mean(history['accept'][40:]))
+    assert history['acceptance_rate'] == pytest.approx(sampling)
