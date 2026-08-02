@@ -1,11 +1,13 @@
 import numpy as np
 import torch
+from helpers import gauge_transform_links, random_su
 
 from src.actions import HiggsAction
 from src.dirac import WilsonDiracOperator
 from src.hmc import StandardModelHMC
-from src.lattice import create_lattice
+from src.lattice import create_lattice, get_pbc_edge_index
 from src.measure import (
+    calculate_polyakov_loop,
     ensemble_cornell_potential,
     ensemble_electroweak_masses,
     ensemble_pion_mass,
@@ -37,6 +39,27 @@ def test_cornell_potential_vanishes_on_cold_ensemble() -> None:
                                            shape, edge_index, r_max=2, t_fixed=2)
     for _, (v, _) in potential.items():
         assert abs(v) < 1e-4
+
+
+def test_polyakov_loop_is_one_on_cold_configuration() -> None:
+    L, dims = 4, 2
+    edge_index, _ = get_pbc_edge_index(L, dims, 'cpu')
+    u_id = torch.eye(3, dtype=torch.complex64).expand(edge_index.size(1), 3, 3)
+    assert abs(calculate_polyakov_loop(u_id, L, dims, edge_index) - 1.0) < 1e-6
+
+
+def test_polyakov_loop_gauge_invariant() -> None:
+    L, dims = 4, 2
+    edge_index, _ = get_pbc_edge_index(L, dims, 'cpu')
+    u = random_su(3, edge_index.size(1), seed=7)
+    g = random_su(3, L ** dims, seed=8)
+    u_t = gauge_transform_links(u, g, edge_index)
+
+    p = calculate_polyakov_loop(u, L, dims, edge_index)
+    p_t = calculate_polyakov_loop(u_t, L, dims, edge_index)
+    assert abs(p - p_t) < 1e-5
+    # the observable must not be trivially constant for the check to bite
+    assert abs(p - 1.0) > 1e-3
 
 
 def _identity_pion_mass(bare_mass: float) -> float:
