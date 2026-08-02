@@ -444,12 +444,37 @@ def measure_electroweak_masses(
 # Miscellaneous ensemble statistics
 # ---------------------------------------------------------------------------
 
-def calculate_polyakov_loop(u_su3: torch.Tensor, L: int) -> float:
-    """Confinement order parameter, assuming the interleaved 2D edge layout."""
-    u_grid = u_su3.reshape(-1, 4, 3, 3)
-    u_temporal = u_grid[:, 2]
-    traces = torch.real(torch.diagonal(u_temporal, dim1=-2, dim2=-1).sum(-1))
-    return torch.mean(traces).item() / 3.0
+@torch.no_grad()
+def calculate_polyakov_loop(
+    u_gates: torch.Tensor,
+    L: int,
+    dimensions: int,
+    edge_index: torch.Tensor,
+    temporal_dim: int | None = None,
+) -> float:
+    """Confinement order parameter: mean Re Tr(P)/N of the ordered product of
+    forward links around the periodic temporal cycle, averaged over the spatial
+    sites of one temporal slice. Assumes the interleaved get_pbc_edge_index
+    layout, where node n's forward link in direction d is edge n*2*dims + 2*d."""
+    t_dim = dimensions - 1 if temporal_dim is None else temporal_dim
+    group_dim = u_gates.size(-1)
+    device = u_gates.device
+
+    stride = L ** t_dim
+    nodes = torch.arange(L ** dimensions, device=device)
+    nodes = nodes[(nodes // stride) % L == 0]
+
+    loop = torch.eye(group_dim, dtype=u_gates.dtype, device=device)
+    loop = loop.expand(nodes.numel(), group_dim, group_dim)
+    for _ in range(L):
+        e = nodes * (2 * dimensions) + 2 * t_dim
+        # transport acts on column vectors, so each further link multiplies
+        # from the left (same convention as find_rectangular_loops)
+        loop = torch.matmul(u_gates[e], loop)
+        nodes = edge_index[1, e]
+
+    tr = torch.einsum('pii -> p', loop).real
+    return (tr / group_dim).mean().item()
 
 
 def calculate_susceptibility(samples: list[dict]) -> tuple[float, float]:
